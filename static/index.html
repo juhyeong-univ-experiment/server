@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Book Reco WS Chat</title>
+    <style>
+      :root {
+        --bg: #111827;
+        --panel: #1f2937;
+        --line: #374151;
+        --sub1: #93c5fd;
+        --sub2: #9ca3af;
+      }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: #f9fafb;
+      }
+      .app {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      h1 {
+        margin: 0 0 16px;
+        font-size: 20px;
+      }
+      .chat {
+        height: 65vh;
+        overflow: auto;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 16px;
+        scrollbar-width: none; /* Firefox */
+        -ms-overflow-style: none; /* IE/Edge legacy */
+      }
+      .chat::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+      }
+      .msg {
+        margin: 14px 0;
+        padding: 11px 13px;
+        border-radius: 10px;
+        line-height: 1.4;
+        white-space: pre-wrap;
+        width: fit-content;
+        max-width: min(78%, 760px);
+      }
+      .user {
+        background: #2563eb;
+        margin-left: auto;
+      }
+      .assistant {
+        background: #374151;
+      }
+      .event {
+        background: #0f172a;
+        border: 1px dashed #475569;
+        color: #93c5fd;
+        margin-left: auto;
+        margin-right: auto;
+      }
+      .sys {
+        margin: 14px auto;
+        text-align: center;
+        width: 100%;
+        max-width: 760px;
+      }
+      .sys.sub1 { color: var(--sub1); font-size: 13px; }
+      .sys.sub2 { color: var(--sub2); font-size: 12px; }
+      .badge {
+        display: inline-block;
+        border-radius: 999px;
+        padding: 2px 8px;
+        font-size: 11px;
+        font-weight: 700;
+        margin-right: 6px;
+        border: 1px solid currentColor;
+      }
+      .badge.vdb { color: #7dd3fc; }
+      .badge.db { color: #c4b5fd; }
+      .badge.llm { color: #86efac; }
+      .badge.pipe { color: #fca5a5; }
+      .badge.type { color: #fcd34d; }
+      .badge.intent { color: var(--sub1); }
+      .error { background: #7f1d1d; }
+      .hint-wrap {
+        margin-top: 10px;
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .hint-btn {
+        border: 1px solid #475569;
+        color: #cbd5e1;
+        background: #0f172a;
+        border-radius: 999px;
+        padding: 7px 12px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .controls {
+        margin-top: 12px;
+        display: grid;
+        gap: 8px;
+      }
+      textarea, input, button, select {
+        border-radius: 8px;
+        border: 1px solid #4b5563;
+        background: #111827;
+        color: #f9fafb;
+        padding: 10px;
+        font-size: 14px;
+      }
+      button { cursor: pointer; background: #059669; border: 0; }
+      .row { display: flex; gap: 8px; }
+      .row > * { flex: 1; }
+      .book-reommendations {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        margin-top: 8px;
+        width: 100%;
+      }
+      .book-card {
+        background: #111827;
+        border: 1px solid #4b5563;
+        border-radius: 8px;
+        padding: 10px;
+      }
+      .book-card h4 { margin: 0 0 6px; font-size: 14px; }
+      .book-card p { margin: 0; font-size: 13px; color: #d1d5db; }
+      .user-img {
+        margin-top: 8px;
+        max-width: 240px;
+        border-radius: 8px;
+        border: 1px solid #60a5fa;
+      }
+      details.event-list {
+        width: fit-content;
+        max-width: min(90%, 760px);
+        margin: 12px auto;
+        color: var(--sub2);
+        font-size: 12px;
+      }
+      details.event-list summary {
+        cursor: pointer;
+        color: var(--sub2);
+      }
+      details.event-list pre {
+        margin: 6px 0 0;
+        background: #0b1220;
+        border: 1px solid #334155;
+        border-radius: 8px;
+        padding: 8px;
+        white-space: pre-wrap;
+      }
+      .md p { margin: 0 0 8px; }
+      .md p:last-child { margin-bottom: 0; }
+      .md ul { margin: 6px 0 8px 16px; padding: 0; }
+      .md li { margin: 3px 0; }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <h1>도서 추천 WebSocket 데모</h1>
+      <div id="chat" class="chat"></div>
+      <div class="hint-wrap">
+        <button class="hint-btn" data-fill="자기계발 책 추천해줘. 데이터베이스에서 검색하지 말고, 직접 추천해줘.">
+          자기계발 책 추천해줘. 데이터베이스에서 검색하지 말고, 직접 추천해줘.
+        </button>
+        <button class="hint-btn" data-fill="판타지 소설 추천해줘.">
+          판타지 소설 추천해줘.
+        </button>
+      </div>
+      <div class="controls">
+        <textarea id="text" rows="3" placeholder="메시지를 입력하세요"></textarea>
+        <div class="row">
+          <input id="image" type="file" accept="image/*" />
+          <select id="locale">
+            <option value="ko">ko</option>
+            <option value="en">en</option>
+          </select>
+          <button id="send">보내기</button>
+        </div>
+      </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script>
+      const chatEl = document.getElementById("chat");
+      const textEl = document.getElementById("text");
+      const imageEl = document.getElementById("image");
+      const localeEl = document.getElementById("locale");
+      const sendBtn = document.getElementById("send");
+      const hintButtons = document.querySelectorAll(".hint-btn");
+
+      const wsScheme = location.protocol === "https:" ? "wss" : "ws";
+      const ws = new WebSocket(`${wsScheme}://${location.host}/ws/chat`);
+      let streamingFinalEl = null;
+      let streamingFinalText = "";
+      let bookStreamMode = false;
+      let bookLineBuffers = [];
+      let bookLineIndex = 0;
+      let bookSummaryEls = [];
+      let bookStreamItems = [];
+      let bookStreamWrapEl = null;
+      // marked.setOptions({ breaks: true });
+
+      function scrollBottom() {
+        chatEl.scrollTop = chatEl.scrollHeight;
+      }
+
+      function appendSystem(text, level = "sub2") {
+        const div = document.createElement("div");
+        div.className = `sys ${level}`;
+        div.textContent = text;
+        chatEl.appendChild(div);
+        scrollBottom();
+      }
+
+      function appendBubble(kind, text, html = null) {
+        const div = document.createElement("div");
+        div.className = `msg ${kind}`;
+        if (html) {
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(html, "text/html");
+          const safeNodes = [...doc.body.childNodes];
+          if (text) {
+            const textNode = document.createElement("div");
+            textNode.className = "md";
+            textNode.innerHTML = marked.parse(text);
+            div.appendChild(textNode);
+          }
+          safeNodes.forEach((node) => div.appendChild(node.cloneNode(true)));
+        } else {
+          div.classList.add("md");
+          div.innerHTML = marked.parse(text || "");
+        }
+        chatEl.appendChild(div);
+        scrollBottom();
+      }
+
+      function appendUserMessage(text, imageDataUrl) {
+        const div = document.createElement("div");
+        div.className = "msg user";
+        if (text) {
+          const txt = document.createElement("div");
+          txt.textContent = text;
+          div.appendChild(txt);
+        }
+        if (imageDataUrl) {
+          const img = document.createElement("img");
+          img.className = "user-img";
+          img.src = imageDataUrl;
+          img.alt = "uploaded image";
+          div.appendChild(img);
+        }
+        chatEl.appendChild(div);
+        scrollBottom();
+      }
+
+      function appendCollapsibleSummary(summaryText, list) {
+        const details = document.createElement("details");
+        details.className = "event-list";
+        const summary = document.createElement("summary");
+        summary.textContent = summaryText;
+        details.appendChild(summary);
+        const pre = document.createElement("pre");
+        pre.textContent = JSON.stringify(list, null, 2);
+        details.appendChild(pre);
+        chatEl.appendChild(details);
+        scrollBottom();
+      }
+
+      function appendToolBadgeMessage(kind, message) {
+        const div = document.createElement("div");
+        div.className = "sys sub2";
+        const badge = document.createElement("span");
+        badge.className = `badge ${kind}`;
+        badge.textContent = kind.toUpperCase();
+        div.appendChild(badge);
+        div.appendChild(document.createTextNode(message));
+        chatEl.appendChild(div);
+        scrollBottom();
+      }
+
+      function mapNodeToBadge(node) {
+        if (node === "pipeline") return "pipe";
+        if (node === "input_type_checker") return "type";
+        if (node === "intention_checker") return "intent";
+        if (node === "vector_db") return "vdb";
+        if (node === "database") return "db";
+        if (node === "chat_completion" || node === "formatter") return "llm";
+        return "sub2";
+      }
+
+      function startFinalStreamingBubble(finalData = {}) {
+        streamingFinalText = "";
+        streamingFinalEl = document.createElement("div");
+        streamingFinalEl.className = "msg assistant";
+        streamingFinalEl.innerHTML = "";
+        chatEl.appendChild(streamingFinalEl);
+
+        const outputType = finalData.output_type;
+        const items = finalData.items || [];
+        if (outputType === "BOOK_RECOMMENDATIONS" && items.length > 0) {
+          bookStreamMode = true;
+          bookLineBuffers = new Array(items.length).fill("");
+          bookLineIndex = 0;
+          bookSummaryEls = new Array(items.length).fill(null);
+          bookStreamItems = items;
+          bookStreamWrapEl = document.createElement("div");
+          bookStreamWrapEl.className = "book-reommendations";
+          streamingFinalEl.appendChild(bookStreamWrapEl);
+        } else {
+          bookStreamMode = false;
+          streamingFinalEl.classList.add("md");
+        }
+        scrollBottom();
+      }
+
+      function ensureBookCard(lineIdx) {
+        if (!bookStreamMode || !bookStreamWrapEl) return null;
+        if (bookSummaryEls[lineIdx]) return bookSummaryEls[lineIdx];
+        const item = bookStreamItems[lineIdx];
+        if (!item) return null;
+        const card = document.createElement("article");
+        card.className = "book-card";
+        card.setAttribute("data-book-id", item.id);
+        const title = document.createElement("h4");
+        title.textContent = item.name || "Untitled";
+        const desc = document.createElement("p");
+        desc.textContent = "";
+        card.appendChild(title);
+        card.appendChild(desc);
+        bookStreamWrapEl.appendChild(card);
+        bookSummaryEls[lineIdx] = desc;
+        return desc;
+      }
+
+      function appendBookLineToken(token) {
+        for (const ch of token) {
+          if (ch === "\r") continue;
+          if (ch === "\n") {
+            if (bookLineIndex < bookLineBuffers.length - 1) {
+              bookLineIndex += 1;
+            }
+            continue;
+          }
+          if (bookLineIndex >= bookLineBuffers.length) continue;
+          bookLineBuffers[bookLineIndex] += ch;
+          const target = ensureBookCard(bookLineIndex);
+          if (target) target.textContent = bookLineBuffers[bookLineIndex].trim();
+        }
+      }
+
+      function appendFinalToken(token) {
+        if (!streamingFinalEl) startFinalStreamingBubble();
+        if (bookStreamMode) {
+          appendBookLineToken(token);
+          scrollBottom();
+          return;
+        }
+        streamingFinalText += token;
+        streamingFinalEl.innerHTML = marked.parse(streamingFinalText);
+        scrollBottom();
+      }
+
+      function buildMappedRecommendationHtml(finalText, items) {
+        const lines = (finalText || "")
+          .split(/\r?\n/)
+          .map((line) => line.trim());
+        const cards = (items || []).map((item, idx) => {
+          const summary = lines[idx] || item.description || "";
+          if (!summary) return "";
+          return `
+            <article class="book-card" data-book-id="${item.id}">
+              <h4>${item.name || "Untitled"}</h4>
+              <p>${summary}</p>
+            </article>
+          `;
+        });
+        return `<div class="book-reommendations">${cards.join("")}</div>`;
+      }
+
+      function finalizeStreamedBubble(finalText, finalHtml, finalData = {}) {
+        if (streamingFinalEl) {
+          if (finalData.output_type === "BOOK_RECOMMENDATIONS") {
+            // Keep incremental line-by-line rendering as-is to avoid newline reflow
+            // caused by final full-text re-parse.
+            // Only backfill missing lines/cards if model ended before all lines appeared.
+            const lines = (finalText || streamingFinalText || "")
+              .split(/\r?\n/)
+              .map((line) => line.trim());
+            const items = finalData.items || [];
+            for (let i = 0; i < items.length; i += 1) {
+              const line = lines[i] || "";
+              if (!line) continue;
+              if (!bookLineBuffers[i] || !bookLineBuffers[i].trim()) {
+                bookLineBuffers[i] = line;
+                const target = ensureBookCard(i);
+                if (target) target.textContent = line;
+              }
+            }
+          } else if (finalHtml) {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(finalHtml, "text/html");
+            const safeNodes = [...doc.body.childNodes];
+            streamingFinalEl.innerHTML = marked.parse(finalText || streamingFinalText || "");
+            safeNodes.forEach((node) => streamingFinalEl.appendChild(node.cloneNode(true)));
+          } else {
+            streamingFinalEl.innerHTML = marked.parse(finalText || streamingFinalText || "");
+          }
+        } else {
+          appendBubble("assistant", finalText, finalHtml);
+        }
+        streamingFinalEl = null;
+        streamingFinalText = "";
+        bookStreamMode = false;
+        bookLineBuffers = [];
+        bookLineIndex = 0;
+        bookSummaryEls = [];
+        bookStreamItems = [];
+        bookStreamWrapEl = null;
+      }
+
+      function readFileAsDataUrl(file) {
+        return new Promise((resolve, reject) => {
+          if (!file) return resolve(null);
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+      }
+
+      ws.onopen = () => appendSystem("채팅에 연결되었습니다.", "sub2");
+      ws.onclose = () => appendBubble("error", "연결 종료");
+      ws.onerror = () => appendBubble("error", "웹소켓 에러 발생");
+
+      ws.onmessage = (evt) => {
+        const payload = JSON.parse(evt.data);
+        const status = payload.status;
+        const node = payload.node;
+        const data = payload.data || {};
+
+        if (status === "USER_MESSAGE") return;
+        if (status === "CONNECTED") {
+          appendSystem("이제 추천받고 싶은 책에 대해 편하게 물어봐주세요!", "sub1");
+          appendSystem("사진으로도 원하는 책을 추천받을 수 있습니다!", "sub1");
+          return;
+        }
+        if (status === "ERROR") {
+          appendBubble("error", `[${payload.node}] ${payload.message}`);
+          return;
+        }
+        if (status === "THINKING") {
+          const badgeKind = mapNodeToBadge(node);
+          if (badgeKind === "sub2") appendSystem(payload.message, "sub1");
+          else appendToolBadgeMessage(badgeKind, payload.message);
+          return;
+        }
+        if (status === "TOOL_DONE") {
+          if (node === "vector_db") {
+            const items = data.items || [];
+            appendToolBadgeMessage("vdb", "벡터 데이터베이스 조회 완료");
+            appendCollapsibleSummary(
+              `벡터 데이터베이스에서 ${items.length}건의 결과를 찾았어요. (클릭해서 목록 보기)`,
+              items
+            );
+            return;
+          }
+          if (node === "database") {
+            const items = data.items || [];
+            appendToolBadgeMessage("db", "데이터베이스 조회 완료");
+            appendCollapsibleSummary(
+              `데이터베이스에서 ${items.length}건의 결과를 찾았어요. (클릭해서 목록 보기)`,
+              items
+            );
+            return;
+          }
+          if (node === "chat_completion") {
+            appendToolBadgeMessage("llm", payload.message || "LLM 처리 완료");
+            return;
+          }
+          appendSystem(payload.message, "sub2");
+          return;
+        }
+        if (status === "FINAL_START") {
+          startFinalStreamingBubble(data);
+          return;
+        }
+        if (status === "FINAL_TOKEN") {
+          appendFinalToken((data && data.token) || "");
+          return;
+        }
+        if (status === "FINAL") {
+          finalizeStreamedBubble(data.text || payload.message, data.html || null, data);
+          return;
+        }
+        if (status === "DONE") return;
+        appendBubble("event", `[${status}] ${payload.message}`);
+      };
+
+      hintButtons.forEach((btn) => {
+        btn.addEventListener("click", () => {
+          textEl.value = btn.dataset.fill || "";
+          textEl.focus();
+        });
+      });
+
+      sendBtn.addEventListener("click", async () => {
+        const text = textEl.value.trim();
+        const file = imageEl.files && imageEl.files[0];
+        if (!text && !file) {
+          appendBubble("error", "텍스트나 이미지를 입력해 주세요.");
+          return;
+        }
+        const imageDataUrl = await readFileAsDataUrl(file);
+        appendUserMessage(text || "", imageDataUrl);
+        ws.send(
+          JSON.stringify({
+            text,
+            locale: localeEl.value,
+            image_data_url: imageDataUrl
+          })
+        );
+        textEl.value = "";
+        imageEl.value = "";
+      });
+    </script>
+  </body>
+  </html>

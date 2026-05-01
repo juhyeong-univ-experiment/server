@@ -1,0 +1,11 @@
+langchain
+langchain-openai
+langgraph
+pydantic
+fastapi
+uvicorn
+python-dotenv
+pymongo
+pymilvus
+sentence-transformers
+tqdm
