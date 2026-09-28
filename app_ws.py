@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import time
 import uuid
@@ -12,11 +13,15 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel
 
 from agent.core.graph import stream_events
+from agent.enrichment.pipeline import enrich_new_book
 from agent.inference.llm import ensure_openai_api_key
-from database import fetch_books_by_ids, search_similar_items
+from database import count_books, fetch_books_by_ids, list_enriched_books, search_similar_items
+from database.profile_store import apply_feedback, delete_profile, get_profile, save_profile
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -81,6 +86,55 @@ async def search_books(
     }
 
 
+def _public_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in profile.items() if k not in ("_id", "updated_at")}
+
+
+@app.get("/api/profile/{user_id}")
+async def read_profile(user_id: str) -> dict[str, Any]:
+    return _public_profile(await asyncio.to_thread(get_profile, user_id))
+
+
+@app.delete("/api/profile/{user_id}")
+async def reset_profile(user_id: str) -> dict[str, Any]:
+    await asyncio.to_thread(delete_profile, user_id)
+    return {"ok": True}
+
+
+class EnrichRequest(BaseModel):
+    title: str
+    author: str | None = None
+    title_en: str | None = None
+
+
+@app.post("/api/enrich")
+async def enrich_book(req: EnrichRequest) -> dict[str, Any]:
+    """Manually trigger the enrichment pipeline (same one the agent uses mid-conversation)."""
+    logs: list[dict[str, Any]] = []
+    book = await enrich_new_book(
+        req.title,
+        req.author,
+        [req.title_en] if req.title_en else None,
+        emit=lambda status, data: logs.append({"status": status, **data}),
+    )
+    return {"book": book, "progress": logs}
+
+
+@app.get("/api/books/enriched")
+async def enriched_books(limit: int = Query(30, ge=1, le=200)) -> dict[str, Any]:
+    items = await asyncio.to_thread(list_enriched_books, limit)
+    return {"items": items, "stats": await asyncio.to_thread(count_books)}
+
+
+@app.get("/api/stats")
+async def stats() -> dict[str, Any]:
+    return await asyncio.to_thread(count_books)
+
+
+async def _send(websocket: WebSocket, payload: dict[str, Any]) -> None:
+    await websocket.send_text(json.dumps(payload, ensure_ascii=False, default=str))
+
+
 def _safe_decode_image_data_url(image_data_url: str | None) -> str | None:
     """
     Convert image data URL to base64 payload only.
@@ -138,18 +192,18 @@ async def _stream_refined_text_from_openai(
     ensure_openai_api_key()
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, streaming=True, max_tokens=600)
     if output_type == "BOOK_RECOMMENDATIONS":
-        print(f"items: {items}")
         system_prompt = (
             "You are a Korean book recommendation assistant. "
             "Generate line-based summaries only. "
             "For each book, provide a concise Korean-friendly summary from title/description only. "
-            "Do not invent facts."
+            "Do not invent facts. "
+            "If a book has personal_reason, weave it into that line naturally."
         )
         user_prompt = (
             f"locale={locale}\n"
             f"output_type={output_type}\n"
             f"user_query={user_query}\n"
-            f"books={items or []}\n"
+            f"books={[{k: b.get(k) for k in ('name', 'description', 'keywords', 'mood', 'personal_reason')} for b in items or []]}\n"
             "출력 형식:\n"
             "- 책 개수와 동일한 줄 수로 출력\n"
             "- 각 줄은 해당 책의 요약 1줄(1~2문장)\n"
@@ -185,7 +239,6 @@ async def _stream_refined_text_from_openai(
             {"role": "user", "content": user_prompt},
         ]
     ):
-        print(f"chunk: {chunk}")
         text = _chunk_to_text(getattr(chunk, "content", ""))
         if not text:
             continue
@@ -221,13 +274,16 @@ async def _stream_refined_text_from_openai(
 async def ws_chat(websocket: WebSocket) -> None:
     await websocket.accept()
     session_id = str(uuid.uuid4())
+    # Stable per-browser id (localStorage) so memory survives reconnects/sessions.
+    user_id = (websocket.query_params.get("user_id") or "").strip()[:64] or f"anon-{session_id}"
     history: list[dict[str, Any]] = []
-    await websocket.send_json(
+    await _send(
+        websocket,
         {
             "status": "CONNECTED",
             "node": "websocket",
             "message": "웹소켓 연결 완료",
-            "data": {"session_id": session_id},
+            "data": {"session_id": session_id, "user_id": user_id},
         }
     )
 
@@ -236,6 +292,32 @@ async def ws_chat(websocket: WebSocket) -> None:
             req_started = time.perf_counter()
             payload = await websocket.receive_json()
             req_id = str(uuid.uuid4())
+
+            # Explicit 👍/👎 on a book card -> straight into long-term memory.
+            if payload.get("type") == "feedback":
+                rating = payload.get("rating")
+                if rating not in ("like", "dislike") or not payload.get("title"):
+                    continue
+                profile = await asyncio.to_thread(get_profile, user_id)
+                profile = apply_feedback(
+                    profile,
+                    book_id=payload.get("book_id"),
+                    title=payload["title"],
+                    rating=rating,
+                    reason=payload.get("reason"),
+                )
+                await asyncio.to_thread(save_profile, profile)
+                await _send(
+                    websocket,
+                    {
+                        "status": "MEMORY",
+                        "node": "feedback",
+                        "message": f"'{payload['title']}'을(를) {'좋아하신 책' if rating == 'like' else '별로였던 책'}으로 기억해둘게요.",
+                        "data": {"changed": True, "profile": _public_profile(profile)},
+                    },
+                )
+                continue
+
             text = (payload.get("text") or "").strip()
             image_data_url = payload.get("image_data_url")
             locale = payload.get("locale", "ko")
@@ -248,7 +330,8 @@ async def ws_chat(websocket: WebSocket) -> None:
             )
 
             if not text and not image_data_url:
-                await websocket.send_json(
+                await _send(
+                    websocket,
                     {
                         "status": "ERROR",
                         "node": "input",
@@ -259,7 +342,8 @@ async def ws_chat(websocket: WebSocket) -> None:
                 continue
 
             history.append({"role": "user", "text": text})
-            await websocket.send_json(
+            await _send(
+                websocket,
                 {
                     "status": "USER_MESSAGE",
                     "node": "input",
@@ -278,7 +362,8 @@ async def ws_chat(websocket: WebSocket) -> None:
                     bool(image_b64),
                 )
             except Exception:
-                await websocket.send_json(
+                await _send(
+                    websocket,
                     {
                         "status": "ERROR",
                         "node": "input",
@@ -293,7 +378,8 @@ async def ws_chat(websocket: WebSocket) -> None:
             if history_context:
                 request_text = f"{text}\n\n[conversation_context]\n{history_context}"
 
-            await websocket.send_json(
+            await _send(
+                websocket,
                 {
                     "status": "THINKING",
                     "node": "pipeline",
@@ -309,6 +395,7 @@ async def ws_chat(websocket: WebSocket) -> None:
                 request_text=request_text,
                 image_b64=image_b64,
                 locale=locale,
+                user_id=user_id,
             ):
                 graph_events += 1
                 enriched: dict[str, Any] = {
@@ -330,7 +417,8 @@ async def ws_chat(websocket: WebSocket) -> None:
                     text_output = final_data.get("text", "") or ""
                     html_output = final_data.get("html")
 
-                    await websocket.send_json(
+                    await _send(
+                        websocket,
                         {
                             "status": "FINAL_START",
                             "node": "formatter",
@@ -340,9 +428,26 @@ async def ws_chat(websocket: WebSocket) -> None:
                                 "session_id": session_id,
                                 "output_type": final_data.get("output_type") or final_data.get("type"),
                                 "items": final_data.get("items") or [],
+                                "personal_intro": final_data.get("personal_intro"),
+                                "enrichment": final_data.get("enrichment"),
                             },
                         }
                     )
+                    output_type = final_data.get("output_type") or final_data.get("type")
+                    if output_type == "READING_ROADMAP":
+                        # Structured output: no line-refinement streaming needed.
+                        await _send(
+                            websocket,
+                            {
+                                "status": "FINAL",
+                                "node": "formatter",
+                                "message": "최종 응답을 구성했어요.",
+                                "data": final_data,
+                                "request_id": req_id,
+                                "session_id": session_id,
+                            },
+                        )
+                        continue
 
                     refined_text = ""
                     idx = 0
@@ -356,7 +461,8 @@ async def ws_chat(websocket: WebSocket) -> None:
                             items=final_data.get("items"),
                         ):
                             refined_text += token
-                            await websocket.send_json(
+                            await _send(
+                                websocket,
                                 {
                                     "status": "FINAL_TOKEN",
                                     "node": "formatter",
@@ -381,7 +487,8 @@ async def ws_chat(websocket: WebSocket) -> None:
                         refined_text = text_output
                         logger.exception("ws_final_stream_fallback req_id=%s", req_id)
 
-                    await websocket.send_json(
+                    await _send(
+                        websocket,
                         {
                             "status": "FINAL",
                             "node": "formatter",
@@ -396,12 +503,16 @@ async def ws_chat(websocket: WebSocket) -> None:
                         }
                     )
                 else:
-                    await websocket.send_json(enriched)
+                    await _send(websocket, enriched)
                 await asyncio.sleep(0)
 
             if final_event:
                 data = final_event.get("data", {})
                 assistant_text = data.get("text", "")
+                titles = [item.get("name") for item in data.get("items") or [] if item.get("name")]
+                if titles:
+                    # keep titles in the short-term context so "첫 번째 책 별로였어" can be resolved
+                    assistant_text = f"{assistant_text}\n추천한 책: {', '.join(titles)}"
                 history.append({"role": "assistant", "text": assistant_text})
 
             logger.info(
@@ -409,7 +520,8 @@ async def ws_chat(websocket: WebSocket) -> None:
                 req_id,
                 (time.perf_counter() - req_started) * 1000,
             )
-            await websocket.send_json(
+            await _send(
+                websocket,
                 {
                     "status": "DONE",
                     "node": "pipeline",

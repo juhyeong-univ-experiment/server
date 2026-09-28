@@ -11,14 +11,23 @@ from database import fetch_books_by_ids, search_similar_items
 
 logger = logging.getLogger(__name__)
 
+def memory_exclude_ids(profile: dict[str, Any] | None) -> list[str]:
+    """Books the user already disliked/read or was already recommended are not recommended again."""
+    profile = profile or {}
+    ids = [e.get("book_id") for key in ("disliked", "liked", "recommended") for e in profile.get(key) or []]
+    return [i for i in dict.fromkeys(ids) if i]
+
+
 async def vector_db_node(state: AgentState) -> dict[str, Any]:
     intention = state.get("intention") or {}
     query_text = intention.get("query_text") or state.get("request_text") or ""
     top_k = 10
     error = None
     started = time.perf_counter()
+    exclude_ids = memory_exclude_ids(state.get("user_profile"))
     try:
-        result = await asyncio.to_thread(search_similar_items, query_text, top_k)
+        result = await asyncio.to_thread(search_similar_items, query_text, top_k, exclude_ids)
+        result["excluded_by_memory"] = len(exclude_ids)
     except Exception as exc:
         # Fail-safe: keep pipeline alive with empty result and explicit error payload.
         error = str(exc)

@@ -9,15 +9,31 @@ from pydantic import BaseModel, Field
 from agent.base.events import make_event
 from agent.base.states import AgentState
 from agent.inference.llm import get_chat_model
+from agent.memory.profile_view import profile_to_prompt
 
 logger = logging.getLogger(__name__)
+
+
+class MentionedBook(BaseModel):
+    title: str = Field(description="Title exactly as the user wrote it.")
+    title_en: str | None = Field(default=None, description="English/original title if you know it.")
+    author: str | None = None
 
 
 class IntentionDecision(BaseModel):
     user_visible_text: str = Field(description="Detailed Korean explanation in 2-4 sentences.")
     intent_label: str = Field(description="Intent identifier in snake_case.")
-    route: Literal["vector_db", "chat_completion"]
-    query_text: str
+    route: Literal["vector_db", "roadmap", "chat_completion"]
+    query_text: str = Field(
+        description=(
+            "ENGLISH semantic-search query describing the wanted books (genre, themes, mood, pace). "
+            "The vector DB is English, so always write it in English."
+        )
+    )
+    mentioned_books: list[MentionedBook] = Field(
+        default_factory=list,
+        description="Specific books the user named as a reference/anchor (e.g. '데미안 같은 책' -> 데미안).",
+    )
     reason: str
 
 
@@ -38,6 +54,23 @@ _DB_SEARCH_HINTS = [
     "검색",
     "recommend",
     "similar book",
+]
+
+_ROADMAP_HINTS = [
+    "로드맵",
+    "입문",
+    "단계별",
+    "순서대로",
+    "공부하고 싶",
+    "공부하려",
+    "탐구",
+    "깊이 알고",
+    "깊게 알고",
+    "처음부터",
+    "기초부터",
+    "독서 경로",
+    "roadmap",
+    "reading path",
 ]
 
 _DIRECT_QA_HINTS = [
@@ -66,6 +99,11 @@ def _should_skip_db(latest_text: str) -> bool:
 def _has_db_search_intent(latest_text: str) -> bool:
     lowered = latest_text.lower()
     return any(hint in lowered for hint in _DB_SEARCH_HINTS)
+
+
+def _has_roadmap_intent(latest_text: str) -> bool:
+    lowered = latest_text.lower()
+    return any(hint in lowered for hint in _ROADMAP_HINTS)
 
 
 def _has_direct_qa_intent(latest_text: str) -> bool:
@@ -143,11 +181,14 @@ async def intention_checker_node(state: AgentState) -> dict[str, Any]:
                     "출력 규칙:\n"
                     "1) user_visible_text는 2~4문장 한국어.\n"
                     "2) 반드시 근거, 의도 해석, 다음 동작 포함.\n"
-                    "3) route는 vector_db 또는 chat_completion.\n"
+                    "3) route는 vector_db, roadmap, chat_completion 중 하나.\n"
                     "4) 이미지에 책이 없으면 chat_completion.\n"
-                    "5) 검색 의도가 있으면 vector_db.\n"
+                    "5) 검색 의도가 있으면 vector_db. 특정 주제를 단계적으로 공부/탐구하려 하면 roadmap.\n"
                     "6) route=vector_db이면 마지막 문장을 '데이터베이스에서 검색해볼게요.'로 마감.\n"
                     "7) route=chat_completion이면 마지막 문장을 '제가 바로 답변해드릴게요.'로 마감.\n"
+                    "8) query_text는 반드시 영어. 사용자의 장기기억(선호 스타일/관심사)이 이번 요청과 관련되면 반영하되, "
+                    "이번 요청이 우선이다. 기피 소재는 query_text에 넣지 마라.\n"
+                    "9) 사용자가 기준으로 언급한 구체적 책 제목은 mentioned_books에 넣어라. 이미지에서 인식한 책도 포함.\n"
                 ),
             },
             {
@@ -156,6 +197,7 @@ async def intention_checker_node(state: AgentState) -> dict[str, Any]:
                     f"request_text={state.get('request_text')}\n"
                     f"input_type={state.get('input_type')}\n"
                     f"image_analysis={state.get('image_analysis')}\n"
+                    f"[user_long_term_memory]\n{profile_to_prompt(state.get('user_profile'))}\n"
                 ),
             },
         ]
@@ -194,6 +236,17 @@ async def intention_checker_node(state: AgentState) -> dict[str, Any]:
             "요청 문장에서 데이터베이스 검색을 원하지 않는 의도를 확인했어요. "
             "그래서 검색 단계는 생략하고, 질문 맥락을 바탕으로 바로 추천을 생성할게요. "
             "제가 바로 답변해드릴게요."
+        )
+    elif _has_roadmap_intent(latest_text) or (
+        route == "roadmap" and not _has_direct_qa_intent(latest_text)
+    ):
+        route = "roadmap"
+        dumped["route"] = route
+        dumped["intent_label"] = "reading_roadmap"
+        dumped["user_visible_text"] = (
+            "특정 주제를 단계적으로 탐구하려는 의도가 보여요. "
+            "한 권이 아니라 입문서 → 대중서 → 심화서로 이어지는 독서 경로를 설계하는 게 적합해 보여요. "
+            "현재 수준과 상황에 맞춰 로드맵을 짜볼게요."
         )
     elif _has_direct_qa_intent(latest_text) and not _has_db_search_intent(latest_text):
         route = "chat_completion"
@@ -258,7 +311,11 @@ async def chat_completion_node(state: AgentState) -> dict[str, Any]:
         [
             {
                 "role": "system",
-                "content": "당신은 친절한 도서 추천 비서다. 한국어로 핵심 위주로 답해라.",
+                "content": (
+                    "당신은 친절한 도서 추천 비서다. 한국어로 핵심 위주로 답해라. "
+                    "사용자의 장기기억이 주어지면 자연스럽게 활용하고(예: 지난번 좋아한 책 언급), "
+                    "사용자가 책에 대한 감상/피드백을 말하면 기억해두겠다고 짧게 확인해라."
+                ),
             },
             {
                 "role": "user",
@@ -267,6 +324,7 @@ async def chat_completion_node(state: AgentState) -> dict[str, Any]:
                     f"intention={intention}\n"
                     f"request_text={state.get('request_text')}\n"
                     f"image_analysis={state.get('image_analysis')}\n"
+                    f"[user_long_term_memory]\n{profile_to_prompt(state.get('user_profile'))}\n"
                 ),
             },
         ]
@@ -300,8 +358,20 @@ async def formatter_node(state: AgentState) -> dict[str, Any]:
     chat_result = state.get("chat_result") or ""
     locale = state.get("locale", "ko")
 
+    roadmap = state.get("roadmap")
+    personal_intro = state.get("personal_intro")
+    enrichment = state.get("enrichment") or {}
+
+    if roadmap:
+        payload = {
+            "output_type": "READING_ROADMAP",
+            "text": roadmap.get("intro") or "",
+            "html": None,
+            "items": [book for stage in roadmap.get("stages", []) for book in stage.get("books", [])],
+            "roadmap": roadmap,
+        }
     # No summarization: return DB fields as-is for fastest response.
-    if db_items:
+    elif db_items:
         cards = []
         normalized_items: list[dict[str, Any]] = []
         for item in db_items:
@@ -330,6 +400,8 @@ async def formatter_node(state: AgentState) -> dict[str, Any]:
             ),
             "html": '<div class="book-reommendations">' + "".join(cards) + "</div>",
             "items": normalized_items,
+            "personal_intro": personal_intro,
+            "enrichment": enrichment,
         }
     else:
         payload = {

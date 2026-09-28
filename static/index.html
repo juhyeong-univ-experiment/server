@@ -159,6 +159,39 @@
         padding: 8px;
         white-space: pre-wrap;
       }
+      .badge.enrich { color: #fdba74; }
+      .badge.mem { color: #f9a8d4; }
+      .badge.map { color: #a7f3d0; }
+      .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+      .topbar h1 { margin: 0; }
+      .topbar .stat { color: var(--sub2); font-size: 12px; }
+      .topbar button { background: #1e293b; border: 1px solid #475569; padding: 7px 12px; font-size: 12px; }
+      .layout { display: grid; grid-template-columns: 1fr; gap: 12px; }
+      .layout.with-panel { grid-template-columns: 1fr 300px; }
+      .panel { display: none; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; height: 65vh; overflow: auto; font-size: 13px; }
+      .layout.with-panel .panel { display: block; }
+      .panel h3 { margin: 0 0 10px; font-size: 14px; }
+      .panel h5 { margin: 12px 0 6px; font-size: 12px; color: var(--sub1); }
+      .panel .empty { color: var(--sub2); }
+      .chip { display: inline-block; border: 1px solid #475569; border-radius: 999px; padding: 2px 8px; margin: 2px 4px 2px 0; font-size: 11px; color: #cbd5e1; }
+      .chip.like { border-color: #22c55e; color: #86efac; }
+      .chip.dislike { border-color: #ef4444; color: #fca5a5; }
+      .chip.new { border-color: #f97316; color: #fdba74; font-weight: 700; }
+      .panel .reset { margin-top: 14px; background: #7f1d1d; font-size: 12px; padding: 7px 10px; }
+      .book-meta { margin-top: 6px; }
+      .book-card .personal { margin-top: 6px; color: #f9a8d4; font-size: 12px; }
+      .book-card .fb { margin-top: 8px; display: flex; gap: 6px; }
+      .book-card .fb button { background: #0f172a; border: 1px solid #475569; padding: 4px 10px; font-size: 12px; }
+      .book-card .fb button.on { border-color: #f9a8d4; color: #f9a8d4; }
+      .intro { margin-bottom: 8px; color: #f9a8d4; }
+      .roadmap { display: flex; flex-direction: column; gap: 10px; width: 100%; }
+      .stage { border-left: 3px solid #475569; padding: 4px 0 4px 12px; }
+      .stage.start { border-left-color: #34d399; }
+      .stage h4 { margin: 0 0 4px; font-size: 14px; }
+      .stage .goal { color: #cbd5e1; font-size: 12px; margin-bottom: 6px; }
+      .stage .bridge { color: var(--sub2); font-size: 12px; margin-top: 6px; }
+      .start-tag { color: #34d399; font-size: 11px; margin-left: 6px; }
+      @media (max-width: 760px) { .layout.with-panel { grid-template-columns: 1fr; } .panel { height: auto; } }
       .md p { margin: 0 0 8px; }
       .md p:last-child { margin-bottom: 0; }
       .md ul { margin: 6px 0 8px 16px; padding: 0; }
@@ -167,14 +200,32 @@
   </head>
   <body>
     <div class="app">
-      <h1>도서 추천 WebSocket 데모</h1>
-      <div id="chat" class="chat"></div>
+      <div class="topbar">
+        <div>
+          <h1>도서 추천 WebSocket 데모</h1>
+          <div class="stat" id="stat">DB 통계 불러오는 중…</div>
+        </div>
+        <button id="togglePanel">🧠 내 취향 기억 보기</button>
+      </div>
+      <div class="layout" id="layout">
+        <div id="chat" class="chat"></div>
+        <aside class="panel" id="panel"></aside>
+      </div>
       <div class="hint-wrap">
         <button class="hint-btn" data-fill="자기계발 책 추천해줘. 데이터베이스에서 검색하지 말고, 직접 추천해줘.">
           자기계발 책 추천해줘. 데이터베이스에서 검색하지 말고, 직접 추천해줘.
         </button>
         <button class="hint-btn" data-fill="판타지 소설 추천해줘.">
           판타지 소설 추천해줘.
+        </button>
+        <button class="hint-btn" data-fill="데미안 같은 성장소설 추천해줘.">
+          [보강] 데미안 같은 성장소설 추천해줘.
+        </button>
+        <button class="hint-btn" data-fill="행동경제학을 처음부터 공부하고 싶어. 요즘 좀 지쳐 있어서 너무 어려운 건 부담스러워.">
+          [로드맵] 행동경제학 처음부터 공부하고 싶어
+        </button>
+        <button class="hint-btn" data-fill="나는 전개가 빠른 책을 좋아하고, 잔인한 묘사는 싫어해. 첫 번째 추천 책은 너무 지루했어.">
+          [기억] 빠른 전개 좋아하고 잔인한 건 싫어
         </button>
       </div>
       <div class="controls">
@@ -198,8 +249,137 @@
       const sendBtn = document.getElementById("send");
       const hintButtons = document.querySelectorAll(".hint-btn");
 
+      const layoutEl = document.getElementById("layout");
+      const panelEl = document.getElementById("panel");
+      const statEl = document.getElementById("stat");
+      document.getElementById("togglePanel").addEventListener("click", () => {
+        layoutEl.classList.toggle("with-panel");
+        if (layoutEl.classList.contains("with-panel")) loadProfile();
+      });
+
+      function getUserId() {
+        let id = null;
+        try { id = localStorage.getItem("book_reco_user_id"); } catch (e) {}
+        if (!id) {
+          id = "u-" + (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()));
+          try { localStorage.setItem("book_reco_user_id", id); } catch (e) {}
+        }
+        return id;
+      }
+      const userId = new URLSearchParams(location.search).get("user_id") || getUserId();
+
       const wsScheme = location.protocol === "https:" ? "wss" : "ws";
-      const ws = new WebSocket(`${wsScheme}://${location.host}/ws/chat`);
+      const ws = new WebSocket(`${wsScheme}://${location.host}/ws/chat?user_id=${encodeURIComponent(userId)}`);
+      const feedbackState = {};
+
+      function esc(v) {
+        return String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+      }
+
+      async function loadStats() {
+        try {
+          const r = await fetch("/api/stats");
+          const d = await r.json();
+          statEl.textContent = `추천 풀 ${d.total}권 · 대화 중 실시간 적재 ${d.enriched}권 · user=${userId}`;
+        } catch (e) { statEl.textContent = ""; }
+      }
+
+      function chips(list, cls = "") {
+        return (list || []).map((x) => `<span class="chip ${cls}">${esc(x)}</span>`).join("");
+      }
+
+      function renderProfile(p) {
+        if (!p) return;
+        const fb = (list, cls) => (list || []).map((e) => `<span class="chip ${cls}" title="${esc(e.reason || "")}">${esc(e.title)}${e.reason ? " · " + esc(e.reason) : ""}</span>`).join("");
+        const levels = Object.entries(p.knowledge_levels || {}).map(([k, v]) => `${k}: ${v}`);
+        const section = (title, html) => `<h5>${title}</h5>${html || '<span class="empty">아직 없음</span>'}`;
+        panelEl.innerHTML = `
+          <h3>🧠 장기기억 (대화 ${p.turns || 0}턴)</h3>
+          ${section("👍 좋아한 책", fb(p.liked, "like"))}
+          ${section("👎 별로였던 책", fb(p.disliked, "dislike"))}
+          ${section("관심사", chips(p.interests))}
+          ${section("선호 스타일", chips(p.preferences))}
+          ${section("기피 소재", chips(p.avoid, "dislike"))}
+          ${section("주제별 지식수준", chips(levels))}
+          ${section(`추천 이력 (${(p.recommended || []).length})`, chips((p.recommended || []).slice(-12).map((e) => e.title)))}
+          <button class="reset" id="resetMemory">기억 초기화</button>`;
+        document.getElementById("resetMemory").onclick = async () => {
+          if (!confirm("장기기억을 초기화할까요?")) return;
+          await fetch(`/api/profile/${encodeURIComponent(userId)}`, { method: "DELETE" });
+          loadProfile();
+        };
+      }
+
+      async function loadProfile() {
+        try {
+          const r = await fetch(`/api/profile/${encodeURIComponent(userId)}`);
+          renderProfile(await r.json());
+        } catch (e) {}
+      }
+
+      function bookMetaHtml(item) {
+        const meta = [];
+        if (item.enriched && item.source && item.source !== "seed") meta.push(`<span class="chip new" title="${esc(item.source)}">실시간 적재</span>`);
+        const diff = { intro: "입문", popular: "대중서", advanced: "심화" }[item.difficulty];
+        if (diff) meta.push(`<span class="chip">${diff}</span>`);
+        const pace = { slow: "느린 전개", medium: "보통 전개", fast: "빠른 전개" }[item.pace];
+        if (pace) meta.push(`<span class="chip">${pace}</span>`);
+        if (item.mood) meta.push(`<span class="chip">${esc(item.mood)}</span>`);
+        meta.push(chips((item.keywords || []).slice(0, 4)));
+        return `<div class="book-meta">${meta.join("")}</div>`;
+      }
+
+      function decorateBookCard(card, item) {
+        card.insertAdjacentHTML("beforeend", bookMetaHtml(item));
+        if (item.personal_reason) {
+          const pr = document.createElement("div");
+          pr.className = "personal";
+          pr.textContent = "💡 " + item.personal_reason;
+          card.appendChild(pr);
+        }
+        const fb = document.createElement("div");
+        fb.className = "fb";
+        ["like", "dislike"].forEach((rating) => {
+          const b = document.createElement("button");
+          b.textContent = rating === "like" ? "👍 좋아요" : "👎 별로예요";
+          if (feedbackState[item.id] === rating) b.classList.add("on");
+          b.onclick = () => {
+            feedbackState[item.id] = rating;
+            fb.querySelectorAll("button").forEach((x) => x.classList.remove("on"));
+            b.classList.add("on");
+            ws.send(JSON.stringify({ type: "feedback", book_id: item.id, title: item.name, rating }));
+          };
+          fb.appendChild(b);
+        });
+        card.appendChild(fb);
+      }
+
+      function renderRoadmap(container, data) {
+        const rm = data.roadmap || {};
+        const wrap = document.createElement("div");
+        wrap.className = "roadmap";
+        wrap.innerHTML = `<div class="md"><p><strong>📚 ${esc(rm.topic)} 독서 로드맵</strong></p><p>${esc(rm.intro)}</p>
+          <p class="stat">추정 수준: ${esc(rm.user_level)} (${esc(rm.level_evidence)}) · 현재 상태: ${esc(rm.emotional_state)}</p></div>`;
+        (rm.stages || []).forEach((st, idx) => {
+          const el = document.createElement("div");
+          el.className = "stage" + (st.stage === rm.start_stage ? " start" : "");
+          el.innerHTML = `<h4>STEP ${idx + 1}. ${esc(st.label)}${st.stage === rm.start_stage ? '<span class="start-tag">← 지금 수준에서 시작</span>' : ""}</h4><div class="goal">${esc(st.goal)}</div>`;
+          const list = document.createElement("div");
+          list.className = "book-reommendations";
+          (st.books || []).forEach((b) => {
+            const card = document.createElement("article");
+            card.className = "book-card";
+            card.setAttribute("data-book-id", b.id);
+            card.innerHTML = `<h4>${b.id === rm.first_book_id ? "⭐ 첫 책 · " : ""}${esc(b.name)}</h4><p>${esc(b.reason)}</p>`;
+            decorateBookCard(card, b);
+            list.appendChild(card);
+          });
+          el.appendChild(list);
+          if (st.bridge) el.insertAdjacentHTML("beforeend", `<div class="bridge">↓ ${esc(st.bridge)}</div>`);
+          wrap.appendChild(el);
+        });
+        container.appendChild(wrap);
+      }
       let streamingFinalEl = null;
       let streamingFinalText = "";
       let bookStreamMode = false;
@@ -295,6 +475,9 @@
         if (node === "vector_db") return "vdb";
         if (node === "database") return "db";
         if (node === "chat_completion" || node === "formatter") return "llm";
+        if (node === "enrichment") return "enrich";
+        if (node === "memory" || node === "memory_update" || node === "personalize" || node === "feedback") return "mem";
+        if (node === "roadmap") return "map";
         return "sub2";
       }
 
@@ -307,7 +490,15 @@
 
         const outputType = finalData.output_type;
         const items = finalData.items || [];
-        if (outputType === "BOOK_RECOMMENDATIONS" && items.length > 0) {
+        if (finalData.personal_intro) {
+          const intro = document.createElement("div");
+          intro.className = "intro";
+          intro.textContent = "💬 " + finalData.personal_intro;
+          streamingFinalEl.appendChild(intro);
+        }
+        if (outputType === "READING_ROADMAP") {
+          bookStreamMode = false;
+        } else if (outputType === "BOOK_RECOMMENDATIONS" && items.length > 0) {
           bookStreamMode = true;
           bookLineBuffers = new Array(items.length).fill("");
           bookLineIndex = 0;
@@ -337,6 +528,7 @@
         desc.textContent = "";
         card.appendChild(title);
         card.appendChild(desc);
+        decorateBookCard(card, item);
         bookStreamWrapEl.appendChild(card);
         bookSummaryEls[lineIdx] = desc;
         return desc;
@@ -389,7 +581,9 @@
 
       function finalizeStreamedBubble(finalText, finalHtml, finalData = {}) {
         if (streamingFinalEl) {
-          if (finalData.output_type === "BOOK_RECOMMENDATIONS") {
+          if (finalData.output_type === "READING_ROADMAP") {
+            renderRoadmap(streamingFinalEl, finalData);
+          } else if (finalData.output_type === "BOOK_RECOMMENDATIONS") {
             // Keep incremental line-by-line rendering as-is to avoid newline reflow
             // caused by final full-text re-parse.
             // Only backfill missing lines/cards if model ended before all lines appeared.
@@ -426,6 +620,7 @@
         bookSummaryEls = [];
         bookStreamItems = [];
         bookStreamWrapEl = null;
+        loadStats();
       }
 
       function readFileAsDataUrl(file) {
@@ -449,9 +644,19 @@
         const data = payload.data || {};
 
         if (status === "USER_MESSAGE") return;
+        if (status === "ENRICH_PROGRESS" || status === "ROADMAP_PROGRESS") {
+          appendToolBadgeMessage(status === "ENRICH_PROGRESS" ? "enrich" : "map", payload.message);
+          return;
+        }
+        if (status === "MEMORY") {
+          if (payload.message) appendToolBadgeMessage("mem", payload.message);
+          if (data.profile) renderProfile(data.profile);
+          return;
+        }
         if (status === "CONNECTED") {
           appendSystem("이제 추천받고 싶은 책에 대해 편하게 물어봐주세요!", "sub1");
           appendSystem("사진으로도 원하는 책을 추천받을 수 있습니다!", "sub1");
+          loadStats();
           return;
         }
         if (status === "ERROR") {
@@ -460,6 +665,7 @@
         }
         if (status === "THINKING") {
           const badgeKind = mapNodeToBadge(node);
+          if (node === "memory" && !(data && data.has_memory)) return;
           if (badgeKind === "sub2") appendSystem(payload.message, "sub1");
           else appendToolBadgeMessage(badgeKind, payload.message);
           return;
@@ -481,6 +687,10 @@
               `데이터베이스에서 ${items.length}건의 결과를 찾았어요. (클릭해서 목록 보기)`,
               items
             );
+            return;
+          }
+          if (node === "enrichment" || node === "personalize" || node === "roadmap") {
+            appendToolBadgeMessage(mapNodeToBadge(node), payload.message);
             return;
           }
           if (node === "chat_completion") {

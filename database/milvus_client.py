@@ -13,7 +13,7 @@ from pymilvus import (
 )
 
 from database.config import get_env
-from database.embeddings import encode_query
+from database.embeddings import encode_query, encode_texts, get_embedding_dimension
 
 _connected = False
 DEFAULT_MILVUS_COLLECTION = "book_embeddings"
@@ -122,9 +122,31 @@ def _embed_query(query_text: str, target_dim: int | None = None) -> list[float]:
     return vector
 
 
-def search_similar_items(query_text: str, top_k: int = 5) -> dict[str, Any]:
+def _collection_name() -> str:
+    return get_env("MILVUS_COLLECTION", DEFAULT_MILVUS_COLLECTION)
+
+
+def ensure_book_collection() -> Collection:
+    return get_or_create_milvus_collection(_collection_name(), get_embedding_dimension())
+
+
+def upsert_book_embeddings(mongo_ids: list[str], texts: list[str]) -> int:
+    """Embed texts and upsert into Milvus (insert for new ids, replace for existing ones)."""
+    if not mongo_ids:
+        return 0
+    collection = ensure_book_collection()
+    vectors = encode_texts(texts)
+    collection.upsert([mongo_ids, vectors])
+    return len(mongo_ids)
+
+
+def search_similar_items(
+    query_text: str,
+    top_k: int = 5,
+    exclude_ids: list[str] | None = None,
+) -> dict[str, Any]:
     connect_milvus()
-    collection_name = get_env("MILVUS_COLLECTION", DEFAULT_MILVUS_COLLECTION)
+    collection_name = _collection_name()
     vector_field = get_env("MILVUS_VECTOR_FIELD", "embedding")
     id_field_preferred = get_env("MILVUS_ID_FIELD", "mongo_id")
     score_metric = get_env("MILVUS_METRIC_TYPE", "COSINE")
@@ -135,12 +157,20 @@ def search_similar_items(query_text: str, top_k: int = 5) -> dict[str, Any]:
     vector_dim = _resolve_vector_dim(collection, vector_field)
     vector = _embed_query(query_text, target_dim=vector_dim)
 
+    expr = None
+    exclude = [i for i in (exclude_ids or []) if i]
+    if exclude:
+        expr = f"{id_field} not in {exclude!r}".replace("'", '"')
+
     results = collection.search(
         data=[vector],
         anns_field=vector_field,
-        param={"metric_type": score_metric, "params": {"nprobe": 10}},
+        param={"metric_type": score_metric, "params": {"nprobe": 16}},
         limit=top_k,
+        expr=expr,
         output_fields=[id_field],
+        # Strong consistency so books enriched a moment ago are immediately searchable.
+        consistency_level="Strong",
     )
 
     items: list[dict[str, Any]] = []
