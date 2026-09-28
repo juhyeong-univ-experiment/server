@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
+from agent.base.events import register_notifier, unregister_notifier
 from agent.core.graph import stream_events
 from agent.enrichment.pipeline import enrich_new_book
 from agent.inference.llm import ensure_openai_api_key
@@ -287,6 +288,12 @@ async def ws_chat(websocket: WebSocket) -> None:
         }
     )
 
+    def _notify(event: dict[str, Any]) -> None:
+        # Background jobs (e.g. thin-record upgrades) finish after the turn; push them live.
+        asyncio.ensure_future(_send(websocket, {**event, "session_id": session_id, "background": True}))
+
+    register_notifier(user_id, _notify)
+
     try:
         while True:
             req_started = time.perf_counter()
@@ -531,3 +538,5 @@ async def ws_chat(websocket: WebSocket) -> None:
             )
     except WebSocketDisconnect:
         return
+    finally:
+        unregister_notifier(user_id, _notify)

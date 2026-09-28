@@ -192,6 +192,10 @@
       .stage .bridge { color: var(--sub2); font-size: 12px; margin-top: 6px; }
       .start-tag { color: #34d399; font-size: 11px; margin-left: 6px; }
       @media (max-width: 760px) { .layout.with-panel { grid-template-columns: 1fr; } .panel { height: auto; } }
+      .live { min-height: 20px; margin-top: 8px; font-size: 12px; color: var(--sub1); display: flex; align-items: center; gap: 8px; }
+      .live .dot { width: 8px; height: 8px; border-radius: 50%; background: #34d399; animation: pulse 1s infinite; }
+      .live.idle .dot { display: none; }
+      @keyframes pulse { 0%,100% { opacity: .3 } 50% { opacity: 1 } }
       .md p { margin: 0 0 8px; }
       .md p:last-child { margin-bottom: 0; }
       .md ul { margin: 6px 0 8px 16px; padding: 0; }
@@ -211,6 +215,7 @@
         <div id="chat" class="chat"></div>
         <aside class="panel" id="panel"></aside>
       </div>
+      <div class="live idle" id="live"><span class="dot"></span><span id="liveText"></span></div>
       <div class="hint-wrap">
         <button class="hint-btn" data-fill="자기계발 책 추천해줘. 데이터베이스에서 검색하지 말고, 직접 추천해줘.">
           자기계발 책 추천해줘. 데이터베이스에서 검색하지 말고, 직접 추천해줘.
@@ -271,6 +276,19 @@
       const wsScheme = location.protocol === "https:" ? "wss" : "ws";
       const ws = new WebSocket(`${wsScheme}://${location.host}/ws/chat?user_id=${encodeURIComponent(userId)}`);
       const feedbackState = {};
+      const liveEl = document.getElementById("live");
+      const liveTextEl = document.getElementById("liveText");
+      const LIVE_LABEL = {
+        input_type_checker: "입력 확인", memory: "🧠 기억 불러오기", intention_checker: "의도 분석",
+        vector_db: "벡터 검색", enrichment: "🔄 추천 풀 보강", database: "상세 조회",
+        personalize: "🧠 개인화", roadmap: "🗺️ 로드맵 설계", memory_update: "🧠 기억 업데이트",
+        chat_completion: "답변 생성", formatter: "응답 스트리밍",
+      };
+      function setLive(node, message) {
+        if (!node) { liveEl.classList.add("idle"); liveTextEl.textContent = ""; return; }
+        liveEl.classList.remove("idle");
+        liveTextEl.textContent = `${LIVE_LABEL[node] || node} 중… ${message || ""}`;
+      }
 
       function esc(v) {
         return String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -642,15 +660,19 @@
         const status = payload.status;
         const node = payload.node;
         const data = payload.data || {};
+        if (status === "DONE") setLive(null);
+        else if (!payload.background && !["CONNECTED", "USER_MESSAGE", "FINAL_TOKEN", "FINAL"].includes(status)) setLive(node, payload.message);
 
         if (status === "USER_MESSAGE") return;
         if (status === "ENRICH_PROGRESS" || status === "ROADMAP_PROGRESS") {
           appendToolBadgeMessage(status === "ENRICH_PROGRESS" ? "enrich" : "map", payload.message);
+          if (payload.background) loadStats();
           return;
         }
         if (status === "MEMORY") {
           if (payload.message) appendToolBadgeMessage("mem", payload.message);
           if (data.profile) renderProfile(data.profile);
+          if (node === "feedback") setLive(null);
           return;
         }
         if (status === "CONNECTED") {

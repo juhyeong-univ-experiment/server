@@ -6,7 +6,7 @@ import os
 import time
 from typing import Any
 
-from agent.base.events import emit_progress, make_event
+from agent.base.events import emit_progress, make_event, notify_user
 from agent.base.states import AgentState
 from agent.database.nodes import memory_exclude_ids
 from agent.enrichment.pipeline import (
@@ -55,6 +55,25 @@ async def enrichment_node(state: AgentState) -> dict[str, Any]:
     anchors: list[dict[str, Any]] = []
     reasons: list[str] = []
 
+    emit(
+        "ENRICH_PROGRESS",
+        {
+            "step": "check",
+            "message": (
+                f"추천 풀 점검 중: 최고 유사도 {items[0]['score']:.2f}, 후보 {len(items)}권"
+                if items
+                else "추천 풀 점검 중: 검색 결과가 없어요."
+            )
+            + (
+                " · 언급하신 책("
+                + ", ".join(m["title"] for m in intention.get("mentioned_books") or [])
+                + ")이 DB에 있는지 확인할게요."
+                if intention.get("mentioned_books")
+                else ""
+            ),
+        },
+    )
+
     # 1) Mentioned reference books
     mentioned = intention.get("mentioned_books") or []
     if mentioned:
@@ -99,6 +118,14 @@ async def enrichment_node(state: AgentState) -> dict[str, Any]:
         except Exception:
             logger.exception("suggest_titles_failed")
             suggestions = []
+        if suggestions:
+            emit(
+                "ENRICH_PROGRESS",
+                {
+                    "step": "suggest",
+                    "message": "보강 후보: " + ", ".join(f"{x['title']}({x.get('author')})" for x in suggestions),
+                },
+            )
         results = await run_limited(
             [
                 enrich_new_book(
@@ -134,8 +161,14 @@ async def enrichment_node(state: AgentState) -> dict[str, Any]:
     # 3) Thin metadata -> background upgrade (does not block the answer)
     top_books = await asyncio.to_thread(fetch_books_by_ids, [i["id"] for i in items[:5]])
     thin_ids = [b["id"] for b in top_books if is_thin(b)][:3]
+    user_id = state.get("user_id")
+
+    def _push(status: str, data: dict[str, Any]) -> None:
+        # The graph run is over by the time this fires, so push straight to the user's socket.
+        notify_user(user_id, make_event(status, "enrichment", data.get("message", ""), data))
+
     for book_id in thin_ids:
-        _schedule_background(enrich_existing_book(book_id))
+        _schedule_background(enrich_existing_book(book_id, emit=_push))
 
     enrichment = {
         "triggered": bool(reasons),

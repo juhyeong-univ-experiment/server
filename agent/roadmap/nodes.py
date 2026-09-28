@@ -10,10 +10,11 @@ from pydantic import BaseModel, Field
 
 from agent.base.events import emit_progress, make_event
 from agent.base.states import AgentState
-from agent.enrichment.pipeline import enrich_new_book, run_limited
+from agent.enrichment.pipeline import BookRef, enrich_new_book, run_limited
 from agent.inference.llm import get_chat_model
 from agent.memory.profile_view import profile_to_prompt
 from database import fetch_books_by_ids, search_similar_items
+from database.mongo_client import normalize_title
 
 logger = logging.getLogger(__name__)
 
@@ -23,16 +24,12 @@ STAGE_LABEL = {"intro": "입문서", "popular": "대중서", "advanced": "심화
 LEVEL_TO_START = {"beginner": "intro", "intermediate": "popular", "advanced": "advanced"}
 
 
-class CanonicalBook(BaseModel):
-    title: str = Field(description="Title known to Korean readers (Korean edition title if it exists).")
-    title_en: str | None = None
-    author: str | None = None
-
-
 class StagePlan(BaseModel):
     stage: StageKey
     query_en: str = Field(description="English semantic-search query for books at this stage.")
-    canonical_books: list[CanonicalBook] = Field(description="2 real, well-known books that fit this stage.")
+    canonical_books: list[BookRef] = Field(
+        description="2 real, famous books for this stage (e.g. Nudge, Thinking Fast and Slow). Never invent generic titles."
+    )
 
 
 class RoadmapPlan(BaseModel):
@@ -65,13 +62,20 @@ def _latest_user_text(request_text: str) -> str:
     return (request_text or "").split("\n\n[conversation_context]\n", 1)[0].strip()
 
 
+def _lookup_title(book: BookRef, topic: str) -> str:
+    """A Korean title identical to the topic ('행동경제학') matches encyclopedia pages, not the book."""
+    if normalize_title(book.title) == normalize_title(topic) and book.title_en:
+        return book.title_en
+    return book.title
+
+
 async def _gather_stage_candidates(
-    plan: StagePlan, exclude_ids: list[str], emit
+    plan: StagePlan, topic: str, exclude_ids: list[str], emit
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Canonical books (enriched on demand) + vector-search hits for one stage."""
     enriched = await run_limited(
         [
-            enrich_new_book(b.title, b.author, [b.title_en] if b.title_en else None, emit=emit)
+            enrich_new_book(_lookup_title(b, topic), b.author, [b.title_en] if b.title_en else None, emit=emit)
             for b in plan.canonical_books[:2]
         ],
         limit=2,
@@ -110,7 +114,8 @@ async def roadmap_node(state: AgentState) -> dict[str, Any]:
                     "너는 독서 로드맵 설계자다. 사용자의 현재 지식 수준과 감정 상태를 추정하고 "
                     "intro(입문서: 배경지식 불필요) → popular(대중서: 교양 수준) → advanced(심화/전문서) "
                     "세 단계 각각에 대해 검색 쿼리와 실존하는 대표 도서 2권을 제시하라. "
-                    "한국 독자가 구할 수 있는 책을 우선하고, 존재가 불확실한 책은 넣지 마라. "
+                    "한국에 번역 출간된 유명 도서를 우선하고, '행동경제학 입문' 같은 일반명사형 제목을 지어내지 마라. "
+                    "title_en에는 반드시 원제를 적어라(외부 소스 조회에 사용됨). "
                     "장기기억에 있는 지식수준/기피 소재/선호 스타일을 반영하라."
                 ),
             },
@@ -132,8 +137,19 @@ async def roadmap_node(state: AgentState) -> dict[str, Any]:
         e.get("book_id") for e in (profile or {}).get("disliked") or [] if e.get("book_id")
     ] or []
     stage_plans = {p.stage: p for p in plan.stages}
+    for p in plan.stages:
+        emit(
+            "ROADMAP_PROGRESS",
+            {
+                "step": "stage_plan",
+                "stage": p.stage,
+                "message": f"{STAGE_LABEL[p.stage]} 후보 탐색: "
+                + ", ".join(f"{b.title}({b.author})" for b in p.canonical_books[:2])
+                + " + 벡터 검색",
+            },
+        )
     results = await asyncio.gather(
-        *(_gather_stage_candidates(stage_plans[s], exclude_ids, emit) for s in STAGE_ORDER if s in stage_plans)
+        *(_gather_stage_candidates(stage_plans[s], plan.topic, exclude_ids, emit) for s in STAGE_ORDER if s in stage_plans)
     )
     pools: dict[str, list[dict[str, Any]]] = {}
     created: list[dict[str, Any]] = []
@@ -141,6 +157,15 @@ async def roadmap_node(state: AgentState) -> dict[str, Any]:
         pools[stage] = pool
         created += new_books
 
+    emit(
+        "ROADMAP_PROGRESS",
+        {
+            "step": "curate",
+            "message": "후보 수집 완료 ("
+            + ", ".join(f"{STAGE_LABEL[k]} {len(v)}권" for k, v in pools.items())
+            + "). 수준·감정 상태에 맞춰 단계별 책과 첫 책을 고르는 중이에요.",
+        },
+    )
     candidate_view = {
         stage: [
             {
@@ -162,6 +187,7 @@ async def roadmap_node(state: AgentState) -> dict[str, Any]:
                 "role": "system",
                 "content": (
                     "단계별 후보 중에서 독서 경로를 큐레이션하라. 각 단계에서 해당 단계 후보 id만 1~2권 고른다. "
+                    "후보의 difficulty(intro/popular/advanced)가 있으면 단계와 맞는 책을 우선하라. "
                     "주제와 무관한 후보는 고르지 마라. 사용자의 수준이 높으면 앞 단계는 1권만 가볍게, "
                     "감정 상태가 지쳐 있으면 부담 없는 책을 먼저 두는 식으로 첫 책을 정하라. "
                     "bridge에는 앞 책에서 다음 책으로 자연스럽게 넘어가는 이유를 써라."
@@ -194,6 +220,15 @@ async def roadmap_node(state: AgentState) -> dict[str, Any]:
             {"stage": cs.stage, "label": STAGE_LABEL[cs.stage], "goal": cs.goal, "bridge": cs.bridge, "books": books}
         )
 
+    for idx, st in enumerate(stages_out, 1):
+        emit(
+            "ROADMAP_PROGRESS",
+            {
+                "step": "stage_done",
+                "stage": st["stage"],
+                "message": f"STEP {idx}. {st['label']}: " + ", ".join(b["name"] for b in st["books"]),
+            },
+        )
     start_stage = LEVEL_TO_START[plan.user_level]
     first_book_id = curated.first_book_id if curated.first_book_id in used else None
     if not first_book_id and stages_out:

@@ -46,7 +46,7 @@ class FakeStructured:
                      query_text="coming-of-age novel about self discovery", mentioned_books=mentioned, reason="x")
         if name == "ExtractedBook":
             title = re.search(r"요청 도서: (.+?) /", t).group(1)
-            return S(is_real_book=True, title=title, title_en=title, author="Stub Author", year=1919,
+            return S(matched_sources=["openlibrary", "wikipedia-en", "wikipedia-ko"], is_real_book=True, title=title, title_en=title, author="Stub Author", year=1919,
                      summary_ko=f"{title}의 요약입니다.", keywords=["성장", "자아"], mood="사색적인",
                      emotional_arc="혼란에서 각성으로", pace="slow", difficulty="popular", topics=["성장소설"],
                      category=["fiction", "classics"],
@@ -56,7 +56,7 @@ class FakeStructured:
         if name == "Personalization":
             ids = _ids(t)
             return S(intro="지난번에 좋아하신 책처럼 빠른 전개의 책을 먼저 골랐어요.",
-                     books=[{"id": i, "keep": True, "personal_reason": "빠른 전개 선호와 맞아요"} for i in ids])
+                     books=[{"id": i, "keep": True, "conflict_evidence": "", "personal_reason": "빠른 전개 선호와 맞아요"} for i in ids])
         if name == "MemoryUpdate":
             if "빠른" in t.split("최근 추천했던")[0]:
                 recent = ast.literal_eval(re.search(r"최근 추천했던 책 제목: (\[.*?\])", t).group(1))
@@ -66,7 +66,7 @@ class FakeStructured:
             return S(learned="")
         if name == "RoadmapPlan":
             stages = [
-                {"stage": s, "query_en": q, "canonical_books": [{"title": b, "title_en": b}]}
+                {"stage": s, "query_en": q, "canonical_books": [{"title": b, "title_en": b, "author": "x"}]}
                 for s, q, b in [
                     ("intro", "introductory behavioral economics", "Nudge"),
                     ("popular", "popular psychology decision making", "Thinking, Fast and Slow"),

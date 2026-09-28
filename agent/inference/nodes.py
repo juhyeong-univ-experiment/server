@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Literal
 
@@ -46,8 +47,15 @@ _NO_DB_HINTS = [
     "직접 추천",
 ]
 
+# "추천해줘/추천 좀/추천받고" = request. A bare "추천" (e.g. "추천해준 책은 지루했어") is not.
+_RECOMMEND_REQUEST_RE = re.compile(r"추천\s*(해\s*줘|해\s*주|해\s*달|좀|받|부탁|해봐|해 봐|할\s*만한|하는\s*책|\?|$)")
+_FEEDBACK_HINTS = [
+    "재밌었", "재미있었", "재미없었", "지루했", "별로였", "좋았어", "좋았다", "최고였", "실망",
+    "좋아해", "싫어해", "좋아하는 편", "싫어하는 편", "선호해", "싫더라", "좋더라",
+]
+_REFERENCE_RE = re.compile(r"[『「'\"“‘]([^』」'\"”’]{1,40})[』」'\"”’]|([가-힣A-Za-z0-9]{2,20})\s*(?:같은|처럼|와 비슷한|과 비슷한|이랑 비슷한|랑 비슷한)")
+
 _DB_SEARCH_HINTS = [
-    "추천",
     "비슷한 책",
     "유사한 책",
     "찾아줘",
@@ -98,7 +106,22 @@ def _should_skip_db(latest_text: str) -> bool:
 
 def _has_db_search_intent(latest_text: str) -> bool:
     lowered = latest_text.lower()
-    return any(hint in lowered for hint in _DB_SEARCH_HINTS)
+    return bool(_RECOMMEND_REQUEST_RE.search(lowered)) or any(hint in lowered for hint in _DB_SEARCH_HINTS)
+
+
+def _is_feedback_only(latest_text: str) -> bool:
+    """'A는 지루했어, 빠른 전개가 좋아' -> memory update + short ack, not a new search."""
+    lowered = latest_text.lower()
+    return any(h in lowered for h in _FEEDBACK_HINTS) and not _has_db_search_intent(latest_text)
+
+
+def _regex_reference_books(latest_text: str) -> list[dict[str, Any]]:
+    refs = []
+    for m in _REFERENCE_RE.finditer(latest_text):
+        title = (m.group(1) or m.group(2) or "").strip()
+        if title and title not in ("이런", "그런", "저런", "이것", "그것", "지난번", "요즘", "전개"):
+            refs.append({"title": title, "title_en": None, "author": None})
+    return refs
 
 
 def _has_roadmap_intent(latest_text: str) -> bool:
@@ -188,7 +211,9 @@ async def intention_checker_node(state: AgentState) -> dict[str, Any]:
                     "7) route=chat_completion이면 마지막 문장을 '제가 바로 답변해드릴게요.'로 마감.\n"
                     "8) query_text는 반드시 영어. 사용자의 장기기억(선호 스타일/관심사)이 이번 요청과 관련되면 반영하되, "
                     "이번 요청이 우선이다. 기피 소재는 query_text에 넣지 마라.\n"
-                    "9) 사용자가 기준으로 언급한 구체적 책 제목은 mentioned_books에 넣어라. 이미지에서 인식한 책도 포함.\n"
+                    "9) 사용자가 기준으로 언급한 구체적 책 제목은 mentioned_books에 넣어라(원제 title_en도 채워라). 이미지에서 인식한 책도 포함.\n"
+                    "   예) '데미안 같은 성장소설 추천해줘' -> mentioned_books=[{title:'데미안', title_en:'Demian', author:'Hermann Hesse'}]\n"
+                    "   예) '해리포터처럼 마법 학교 나오는 책' -> [{title:'해리포터', title_en:\"Harry Potter and the Philosopher's Stone\", author:'J.K. Rowling'}]\n"
                 ),
             },
             {
@@ -237,6 +262,16 @@ async def intention_checker_node(state: AgentState) -> dict[str, Any]:
             "그래서 검색 단계는 생략하고, 질문 맥락을 바탕으로 바로 추천을 생성할게요. "
             "제가 바로 답변해드릴게요."
         )
+    elif _is_feedback_only(latest_text):
+        route = "chat_completion"
+        dumped["route"] = route
+        dumped["intent_label"] = "reading_feedback"
+        dumped["reason"] = "User shared feedback/preferences without asking for a new search."
+        dumped["user_visible_text"] = (
+            "새 추천 요청이라기보다 읽은 책에 대한 감상과 취향을 알려주신 것 같아요. "
+            "이 내용은 장기기억에 반영해두고, 다음 추천부터 활용할게요. "
+            "제가 바로 답변해드릴게요."
+        )
     elif _has_roadmap_intent(latest_text) or (
         route == "roadmap" and not _has_direct_qa_intent(latest_text)
     ):
@@ -277,6 +312,8 @@ async def intention_checker_node(state: AgentState) -> dict[str, Any]:
             "그래서 데이터베이스 조회 없이 바로 이해를 돕는 답변으로 진행할게요. "
             "제가 바로 답변해드릴게요."
         )
+    if route == "vector_db" and not dumped.get("mentioned_books"):
+        dumped["mentioned_books"] = _regex_reference_books(latest_text)
     logger.info(
         "node=intention_checker elapsed_ms=%.2f route=%s intent_label=%s",
         (time.perf_counter() - started) * 1000,
@@ -296,6 +333,7 @@ async def intention_checker_node(state: AgentState) -> dict[str, Any]:
                     "intent_label": dumped["intent_label"],
                     "route": dumped["route"],
                     "query_text": dumped["query_text"],
+                    "mentioned_books": dumped.get("mentioned_books"),
                     "reason": dumped["reason"],
                 },
             )
@@ -314,7 +352,8 @@ async def chat_completion_node(state: AgentState) -> dict[str, Any]:
                 "content": (
                     "당신은 친절한 도서 추천 비서다. 한국어로 핵심 위주로 답해라. "
                     "사용자의 장기기억이 주어지면 자연스럽게 활용하고(예: 지난번 좋아한 책 언급), "
-                    "사용자가 책에 대한 감상/피드백을 말하면 기억해두겠다고 짧게 확인해라."
+                    "사용자가 책에 대한 감상/피드백을 말하면(intent_label=reading_feedback) 기억해두겠다고 짧게 확인하고, "
+                    "새 책 목록은 제시하지 말고 이 취향으로 추천받고 싶은지 물어봐라."
                 ),
             },
             {

@@ -12,7 +12,7 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env", override=F
 
 def get_chat_model(temperature: float = 0.0) -> ChatOpenAI:
     ensure_openai_api_key()
-    return ChatOpenAI(model="gpt-4o-mini", temperature=temperature)
+    return ChatOpenAI(model="gpt-4o-mini", temperature=temperature, max_retries=5)
 
 
 def ensure_openai_api_key() -> str:

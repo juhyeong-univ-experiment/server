@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from agent.base.events import make_event
+from agent.base.events import emit_progress, make_event
 from agent.base.states import AgentState
 from agent.inference.llm import get_chat_model
 from agent.memory.profile_view import profile_to_prompt
@@ -41,16 +41,70 @@ async def load_memory_node(state: AgentState) -> dict[str, Any]:
             make_event(
                 "THINKING",
                 "memory",
-                "지난 대화에서 기억해둔 취향을 불러왔어요." if summary else "아직 기억된 취향이 없어요. 대화하면서 알아갈게요.",
+                _loaded_message(profile) if summary else "아직 기억된 취향이 없어요. 대화하면서 알아갈게요.",
                 {"has_memory": bool(summary), "summary": summary},
             )
         ],
     }
 
 
+def _loaded_message(profile: dict[str, Any]) -> str:
+    parts = []
+    if profile.get("liked"):
+        parts.append(f"좋아한 책 {len(profile['liked'])}권")
+    if profile.get("disliked"):
+        parts.append(f"별로였던 책 {len(profile['disliked'])}권")
+    if profile.get("preferences"):
+        parts.append("선호 '" + "', '".join(profile["preferences"][-3:]) + "'")
+    if profile.get("avoid"):
+        parts.append("기피 '" + "', '".join(profile["avoid"][-3:]) + "'")
+    if profile.get("recommended"):
+        parts.append(f"추천 이력 {len(profile['recommended'])}권")
+    return "장기기억을 불러왔어요: " + " · ".join(parts)
+
+
+def _only_new(profile: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
+    """The extractor tends to restate known facts; keep only what is actually new."""
+    out = dict(update)
+    for key in ("interests", "avoid", "preferences"):
+        known = {x.strip().lower() for x in profile.get(key) or []}
+        out[key] = [x for x in update.get(key) or [] if x.strip().lower() not in known]
+    known_fb = {
+        ((e.get("title") or "").strip().lower(), rating)
+        for rating, key in (("like", "liked"), ("dislike", "disliked"))
+        for e in profile.get(key) or []
+    }
+    out["feedback"] = [
+        fb for fb in update.get("feedback") or [] if (fb["title"].strip().lower(), fb["rating"]) not in known_fb
+    ]
+    levels = profile.get("knowledge_levels") or {}
+    out["knowledge_levels"] = [
+        kl for kl in update.get("knowledge_levels") or [] if levels.get(kl["topic"]) != kl["level"]
+    ]
+    return out
+
+
+def _diff_message(update: dict[str, Any]) -> str:
+    parts = []
+    for fb in update.get("feedback") or []:
+        icon = "👍" if fb["rating"] == "like" else "👎"
+        parts.append(f"{icon} '{fb['title']}'" + (f"({fb['reason']})" if fb.get("reason") else ""))
+    for key, label in (("preferences", "선호"), ("interests", "관심사"), ("avoid", "기피")):
+        for item in update.get(key) or []:
+            parts.append(f"+{label} '{item}'")
+    for kl in update.get("knowledge_levels") or []:
+        parts.append(f"지식수준 {kl['topic']}={kl['level']}")
+    return "장기기억 업데이트: " + ", ".join(parts) if parts else ""
+
+
 class RerankedBook(BaseModel):
     id: str
-    keep: bool = Field(description="False if the book clearly conflicts with 기피 소재 or disliked patterns.")
+    conflict_evidence: str = Field(
+        description="Exact phrase from the candidate's description showing a 기피 소재. Empty string if none."
+    )
+    keep: bool = Field(
+        description="False ONLY if conflict_evidence is non-empty and clearly matches a 기피 소재. When unsure, keep=true."
+    )
     personal_reason: str = Field(description="One short Korean sentence connecting this book to the user's memory. Empty if none.")
 
 
@@ -71,6 +125,10 @@ async def personalize_node(state: AgentState) -> dict[str, Any]:
     if not items or not has_memory(profile):
         return {"personal_intro": None, "events": []}
     started = time.perf_counter()
+    emit_progress("personalize")(
+        "MEMORY",
+        {"step": "personalize", "message": f"장기기억 기준으로 후보 {len(items)}권을 개인화(기피 소재 필터·재정렬) 중이에요."},
+    )
     candidates = [
         {
             "id": b["id"],
@@ -91,9 +149,12 @@ async def personalize_node(state: AgentState) -> dict[str, Any]:
                     "role": "system",
                     "content": (
                         "너는 사용자의 장기기억을 바탕으로 추천 목록을 개인화한다. "
-                        "후보 id만 사용하고 새로운 책을 만들지 마라. 기피 소재와 명백히 겹치면 keep=false. "
-                        "intro에서는 기억 속 구체적인 책/취향을 한 번 언급해 초개인화된 느낌을 줘라. "
-                        "기억에 없는 사실은 말하지 마라."
+                        "후보 id만 사용하고 새로운 책을 만들지 마라. 설명에 기피 소재가 핵심으로 드러난 경우에만 keep=false, "
+                        "애매하면 keep=true로 두고 순서만 뒤로 보내라. "
+                        "intro에서는 기억 속 구체적인 책/취향을 한 번 언급해 초개인화된 느낌을 줘라 "
+                        "(예: '지난번 추천드린 A처럼 빠른 전개를 좋아하시니, 이번엔 B를 먼저 추천해요'). "
+                        "intro에서 과거를 언급할 때는 기억에 적힌 항목(좋아한 책, 별로였던 책과 그 이유, 선호 스타일)만 그대로 인용하라. "
+                        "'지난번 추천한 X 장르'처럼 기억에 없는 과거를 지어내지 마라. 좋아한 책이 없으면 선호 스타일/별로였던 책을 근거로 삼아라."
                     ),
                 },
                 {
@@ -117,11 +178,16 @@ async def personalize_node(state: AgentState) -> dict[str, Any]:
         book = by_id.pop(rb.id, None)
         if book is None:
             continue
-        if not rb.keep:
+        if not rb.keep and rb.conflict_evidence.strip():
             dropped.append(book["name"])
             continue
         ordered.append({**book, "personal_reason": rb.personal_reason or None})
     ordered += list(by_id.values())  # keep anything the LLM forgot, at the end
+    # Never let filtering starve the answer: backfill from dropped ones if fewer than 3 remain.
+    if len(ordered) < 3:
+        dropped_books = [b for b in items if b["name"] in dropped]
+        ordered += dropped_books[: 3 - len(ordered)]
+        dropped = [name for name in dropped if name not in {b["name"] for b in ordered}]
     logger.info(
         "node=personalize elapsed_ms=%.2f kept=%d dropped=%d",
         (time.perf_counter() - started) * 1000,
@@ -167,6 +233,9 @@ async def memory_update_node(state: AgentState) -> dict[str, Any]:
     if not user_id:
         return {"events": []}
     started = time.perf_counter()
+    emit_progress("memory_update")(
+        "MEMORY", {"step": "extract", "message": "이번 대화에서 기억해둘 취향이 있는지 정리 중이에요."}
+    )
     profile = state.get("user_profile") or await asyncio.to_thread(get_profile, user_id)
     latest = _latest_user_text(state.get("request_text", ""))
     recent_titles = [e["title"] for e in (profile.get("recommended") or [])[-15:] if e.get("title")]
@@ -181,7 +250,8 @@ async def memory_update_node(state: AgentState) -> dict[str, Any]:
                         "role": "system",
                         "content": (
                             "사용자 발화에서 장기적으로 기억할 독서 취향만 추출한다. "
-                            "일회성 요청(예: '오늘은 판타지')은 interests에 넣지 말고, 반복될 취향/명시적 선호만 넣어라. "
+                            "일회성 요청(예: '판타지 추천해줘', '성장소설 추천해줘')의 장르는 interests에 넣지 마라. "
+                            "사용자가 '좋아한다/관심 있다/싫다'고 명시한 지속적 취향만 넣어라. "
                             "책에 대한 감상(재밌었다/지루했다/별로였다)은 feedback으로. "
                             "'~에 대해 잘 모른다/처음이다/전공자다'는 knowledge_levels로. "
                             "추출할 것이 없으면 모든 리스트를 비우고 learned는 빈 문자열."
@@ -213,6 +283,7 @@ async def memory_update_node(state: AgentState) -> dict[str, Any]:
                     )
                     break
 
+    update_dict = _only_new(profile, update_dict)
     profile = apply_memory_update(profile, update_dict)
     recommended = state.get("book_recommendation") or []
     roadmap = state.get("roadmap") or {}
@@ -231,7 +302,7 @@ async def memory_update_node(state: AgentState) -> dict[str, Any]:
             make_event(
                 "MEMORY",
                 "memory_update",
-                update.learned if changed and update.learned else ("새로 기억한 내용이 있어요." if changed else ""),
+                _diff_message(update_dict) if changed else "새로 기억할 취향은 없었어요.",
                 {"changed": changed, "update": update_dict, "profile": _public_profile(profile)},
             )
         ],
